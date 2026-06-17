@@ -3,59 +3,55 @@ import re
 import json
 import logging
 import sys
+from datetime import datetime
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from mcp.server.fastmcp import FastMCP
 
-# Setup clean logging to stderr so it never corrupts the protocol channels
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(sys.stderr)])
 logger = logging.getLogger("IdeasVault")
 
-# Match the working demo's port structure (defaulting to 8080)
 PORT = int(os.environ.get('PORT', 8080))
 mcp = FastMCP("Ideas Vault Manager", port=PORT)
 
-CONFIG_FILE = os.path.expanduser("~/.idea_vault_config.json")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-def get_vault_dir() -> str:
-    env_dir = os.environ.get("IDEA_VAULT_DIR")
-    if env_dir:
-        return env_dir
 
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-                saved_dir = config.get("vault_dir")
-                if saved_dir and os.path.exists(saved_dir):
-                    return saved_dir
-        except Exception:
-            pass
-            
-    default_dir = os.path.expanduser("~/Idea-Vault/Vault")
-    try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump({"vault_dir": default_dir}, f)
-    except Exception:
-        pass
-        
-    return default_dir
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
 
-VAULT_DIR = get_vault_dir()
-INDEX_FILE = os.path.join(VAULT_DIR, "00_index.md")
 
-os.makedirs(VAULT_DIR, exist_ok=True)
-if not os.path.exists(INDEX_FILE):
-    with open(INDEX_FILE, "w", encoding="utf-8") as f:
-        f.write("# 💡 My Project Ideas Vault\n\nWelcome to your ideas index.\n\n")
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ideas (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL UNIQUE,
+            slug TEXT NOT NULL UNIQUE,
+            content TEXT NOT NULL,
+            brief_summary TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("Database initialized.")
+
 
 def slugify(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(re.compile(r'[^\w\s-]'), '', text)
-    return re.sub(re.compile(r'[-\s]+'), '-', text) + ".md"
+    return re.sub(re.compile(r'[-\s]+'), '-', text)
+
 
 @mcp.tool()
 def save_project_idea(title: str, content: str, brief_summary: str) -> str:
     """
-    Saves a project idea to the Idea Vault as a Markdown file.
+    Saves a project idea to the Idea Vault in a PostgreSQL database.
 
     Use this tool when the user says: save, store, remember, log, or add to vault.
 
@@ -71,61 +67,120 @@ def save_project_idea(title: str, content: str, brief_summary: str) -> str:
 
     ## Roles
     - Role Name — description of responsibilities
-    - Role Name — description of responsibilities
 
     ## Payments
     - Payment method 1
-    - Payment method 2
 
     ## Tech Stack
-    - Technology 1, Technology 2, Technology 3
+    - Technology 1, Technology 2
 
     ## Key Challenges
     - Challenge 1
-    - Challenge 2
 
     ## Tags
     `tag-one` `tag-two` `tag-three`
 
-    The `brief_summary` should be a single sentence describing the idea (used in the index).
+    The `brief_summary` should be a single sentence (used in the index).
     The `title` should be the plain project name without formatting.
 
     Always construct the full `content` string in this format before calling this tool.
     Never call this tool with a partial or freeform `content` value.
     """
-    filename = slugify(title)
-    file_path = os.path.join(VAULT_DIR, filename)
+    slug = slugify(title)
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO ideas (title, slug, content, brief_summary)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (slug) DO UPDATE
+            SET content = EXCLUDED.content,
+                brief_summary = EXCLUDED.brief_summary,
+                updated_at = NOW()
+        """, (title, slug, content, brief_summary))
+        conn.commit()
+        return f"Success! Idea '{title}' saved to the vault."
+    except Exception as e:
+        conn.rollback()
+        return f"Error saving idea: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
 
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    with open(INDEX_FILE, "a", encoding="utf-8") as f:
-        f.write(f"* **[{title}]({filename})**: {brief_summary}\n")
-
-    return f"Success! Created '{filename}' and updated your central index."
-
-@mcp.resource("file://ideas/index")
-def get_ideas_index() -> str:
-    """Provides the contents of the central 00_index.md file containing all logged ideas."""
-    with open(INDEX_FILE, "r", encoding="utf-8") as f:
-        return f.read()
 
 @mcp.tool()
-def read_specific_idea_file(filename: str) -> str:
-    """Reads the contents of a specific idea markdown file from the vault."""
-    clean_filename = os.path.basename(filename)
-    file_path = os.path.join(VAULT_DIR, clean_filename)
-    
-    if not os.path.exists(file_path):
-        return f"Error: File '{clean_filename}' not found in the vault."
-        
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read()
+def list_ideas() -> str:
+    """
+    Lists all saved ideas in the Idea Vault.
+    Returns a summary index of all ideas including title, slug, brief summary, and date saved.
+    Use this when the user asks to see, list, or browse their saved ideas.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT title, slug, brief_summary, created_at FROM ideas ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        if not rows:
+            return "No ideas saved yet."
+        index = "# 💡 Idea Vault Index\n\n"
+        for row in rows:
+            date = row['created_at'].strftime("%b %d, %Y")
+            index += f"- **{row['title']}** (`{row['slug']}`): {row['brief_summary']} — _{date}_\n"
+        return index
+    finally:
+        cur.close()
+        conn.close()
+
+
+@mcp.tool()
+def read_idea(slug: str) -> str:
+    """
+    Reads the full content of a specific idea from the Idea Vault by its slug.
+    Use this when the user wants to view, read, or retrieve a specific saved idea.
+    The slug is the hyphenated lowercase version of the title (e.g. 'water-station-delivery-pos-system').
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT title, content, created_at FROM ideas WHERE slug = %s", (slug,))
+        row = cur.fetchone()
+        if not row:
+            return f"Error: No idea found with slug '{slug}'. Use list_ideas to see available ideas."
+        return row['content']
+    finally:
+        cur.close()
+        conn.close()
+
+
+@mcp.tool()
+def delete_idea(slug: str) -> str:
+    """
+    Deletes a specific idea from the Idea Vault by its slug.
+    Use this when the user asks to remove or delete a saved idea.
+    The slug is the hyphenated lowercase version of the title.
+    Always confirm with the user before deleting.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM ideas WHERE slug = %s RETURNING title", (slug,))
+        row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return f"Error: No idea found with slug '{slug}'."
+        return f"Idea '{row['title']}' deleted from the vault."
+    except Exception as e:
+        conn.rollback()
+        return f"Error deleting idea: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
 
 if __name__ == "__main__":
+    init_db()
     logger.info(f"Starting Idea Vault MCP Server on port {PORT}...")
     try:
-        # Explicitly run as an SSE transport server
         mcp.run(transport="sse")
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
