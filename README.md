@@ -133,6 +133,3 @@ What the project is and how it works.
 
 ---
 
-## License
-
-MIT
