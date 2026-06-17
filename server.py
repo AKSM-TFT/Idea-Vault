@@ -54,16 +54,54 @@ def slugify(text: str) -> str:
 
 @mcp.tool()
 def save_project_idea(title: str, content: str, brief_summary: str) -> str:
-    """Saves a comprehensive project idea into a dedicated Markdown file."""
+    """
+    Saves a project idea to the Idea Vault as a Markdown file.
+
+    Use this tool when the user says: save, store, remember, log, or add to vault.
+
+    The `content` parameter MUST follow this exact Markdown structure:
+
+    # <Title>
+
+    ## Problem Statement
+    What problem this solves and why it matters.
+
+    ## Summary
+    What the project is and how it works.
+
+    ## Roles
+    - Role Name — description of responsibilities
+    - Role Name — description of responsibilities
+
+    ## Payments
+    - Payment method 1
+    - Payment method 2
+
+    ## Tech Stack
+    - Technology 1, Technology 2, Technology 3
+
+    ## Key Challenges
+    - Challenge 1
+    - Challenge 2
+
+    ## Tags
+    `tag-one` `tag-two` `tag-three`
+
+    The `brief_summary` should be a single sentence describing the idea (used in the index).
+    The `title` should be the plain project name without formatting.
+
+    Always construct the full `content` string in this format before calling this tool.
+    Never call this tool with a partial or freeform `content` value.
+    """
     filename = slugify(title)
     file_path = os.path.join(VAULT_DIR, filename)
-    
+
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)
-        
+
     with open(INDEX_FILE, "a", encoding="utf-8") as f:
         f.write(f"* **[{title}]({filename})**: {brief_summary}\n")
-        
+
     return f"Success! Created '{filename}' and updated your central index."
 
 @mcp.resource("file://ideas/index")
