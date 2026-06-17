@@ -1,0 +1,1 @@
+MCP server for idea saving
