@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(sys.stde
 logger = logging.getLogger("IdeasVault")
 
 PORT = int(os.environ.get('PORT', 8080))
-mcp = FastMCP("Ideas Vault Manager", port=PORT)
+mcp = FastMCP("Ideas Vault Manager", port=PORT, host="0.0.0.0")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
